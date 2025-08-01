@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
 use awgman::{
-    utils::{gen_psk, pause},
+    utils::gen_psk,
     vault::{AWGParams, Device, Protocol, Server},
     vault_file::VaultFile,
 };

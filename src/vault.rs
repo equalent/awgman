@@ -1,4 +1,4 @@
-use std::{fmt::{write, Display, Write}, net::IpAddr};
+use std::fmt::{Display, Write};
 
 use base64::{prelude::BASE64_STANDARD, Engine};
 use rand::random_range;
