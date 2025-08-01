@@ -1,21 +1,16 @@
 use atomicwrites::{AllowOverwrite, AtomicFile};
 use bincode::{Decode, Encode};
-use chacha20poly1305::{
-    aead::{Aead, AeadMutInPlace},
-    KeyInit, XChaCha20Poly1305,
-};
-use secrecy::{ExposeSecret, SecretBox, SecretString};
+use chacha20poly1305::{aead::AeadMutInPlace, KeyInit, XChaCha20Poly1305};
+use secrecy::{ExposeSecret, ExposeSecretMut, SecretBox, SecretString};
 use std::{
-    fs::{File, OpenOptions},
-    io::{Read, Seek, SeekFrom, Write},
-    mem,
+    fs::OpenOptions,
+    io::{Seek, Write},
     os::unix::fs::FileExt,
     path::{Path, PathBuf},
-    slice,
 };
 
-use anyhow::{anyhow, Context, Result};
-use serde::{Deserialize, Serialize};
+use anyhow::{anyhow, Result};
+use subtle::ConstantTimeEq;
 
 use crate::vault::Vault;
 
@@ -72,22 +67,17 @@ impl Argon2Params {
         p_cost: 8,      // 8 lanes
     };
 
-    fn new(version: u32, m_cost: u32, t_cost: u32, p_cost: u32) -> Result<Argon2Params> {
-        if version != Argon2Params::MINIMUM.version
-            || m_cost < Argon2Params::MINIMUM.m_cost
-            || t_cost < Argon2Params::MINIMUM.t_cost
-            || p_cost < Argon2Params::MINIMUM.p_cost
+    fn validate(&self) -> Result<()> {
+        if self.version != Argon2Params::MINIMUM.version
+            || self.m_cost < Argon2Params::MINIMUM.m_cost
+            || self.t_cost < Argon2Params::MINIMUM.t_cost
+            || self.p_cost < Argon2Params::MINIMUM.p_cost
         {
             Err(anyhow!(
                 "Attempted to initialise Argon2 params with weak settings"
             ))
         } else {
-            Ok(Argon2Params {
-                version: version,
-                m_cost: m_cost,
-                t_cost: t_cost,
-                p_cost: p_cost,
-            })
+            Ok(())
         }
     }
 
@@ -100,6 +90,19 @@ impl Argon2Params {
 }
 
 impl VaultFile {
+    pub fn vault(&self) -> &Vault {
+        &self.vault
+    }
+
+    pub fn transact<F>(&mut self, f: F) -> Result<()>
+    where
+        F: FnOnce(&mut Vault) -> Result<()>,
+    {
+        f(&mut self.vault)?;
+        self.save()?;
+        Ok(())
+    }
+
     fn derive_secret(
         password: &SecretString,
         params: &Argon2Params,
@@ -163,6 +166,7 @@ impl VaultFile {
         }
 
         let header: VaultHeaderV0 = bincode::decode_from_std_read(&mut file, config)?;
+        header.argon2.validate()?;
 
         let headers_size = file.stream_position()? as usize;
 
@@ -236,5 +240,29 @@ impl VaultFile {
         .map_err(|e| anyhow!("Failed to write file: {}", e))?;
 
         Ok(())
+    }
+
+    pub fn is_password_correct(&self, password: SecretString) -> bool {
+        let mut secret: VaultSecret = [0u8; SECRET_LENGTH];
+        match VaultFile::derive_secret(&password, &self.argon2, &self.salt, &mut secret) {
+            Err(_) => {
+                return false;
+            }
+            _ => {}
+        };
+
+        secret.ct_eq(self.secret.expose_secret()).unwrap_u8() == 1
+    }
+
+    pub fn update_password(&mut self, new_password: SecretString) -> Result<()> {
+        getrandom::fill(&mut self.salt)?;
+        VaultFile::derive_secret(
+            &new_password,
+            &self.argon2,
+            &self.salt,
+            &mut self.secret.expose_secret_mut(),
+        )?;
+
+        self.save()
     }
 }
