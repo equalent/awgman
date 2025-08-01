@@ -19,10 +19,6 @@ jobs:
             target: x86_64-unknown-linux-gnu
             bin_name: awgman
             artifact_name: awgman-linux-amd64
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-            bin_name: awgman
-            artifact_name: awgman-linux-arm64
 
           # macOS 
           - os: macos-latest
@@ -35,10 +31,6 @@ jobs:
             target: x86_64-pc-windows-msvc
             bin_name: awgman.exe
             artifact_name: awgman-windows-amd64.exe
-          - os: windows-latest
-            target: aarch64-pc-windows-msvc
-            bin_name: awgman.exe
-            artifact_name: awgman-windows-arm64.exe
     steps:
       - name: Install NASM
         uses: ilammy/setup-nasm@v1
