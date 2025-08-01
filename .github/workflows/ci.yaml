@@ -1,4 +1,4 @@
-name: Cargo Build & Test
+name: CI Build
 
 on:
   push:
@@ -40,6 +40,8 @@ jobs:
             bin_name: awgman.exe
             artifact_name: awgman-windows-arm64.exe
     steps:
+      - name: Install NASM
+        uses: ilammy/setup-nasm@v1
       - name: Checkout
         uses: actions/checkout@v4
       - name: Install cross linker (Linux aarch64)
