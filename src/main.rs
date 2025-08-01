@@ -1,6 +1,5 @@
 use std::path::absolute;
 
-#[cfg(not(unix))]
 use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
@@ -295,8 +294,11 @@ fn do_top(ctx: &mut Context) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn process_path(s: &String) {
-    expanduser(&args.vault_path)
+fn process_path(s: &String) -> Result<PathBuf> {
+    match expanduser(&s) {
+        Ok(v) => Ok(v),
+        Err(e) => Err(anyhow!("Failed to expand user: {}", e))
+    }
 }
 
 #[cfg(not(unix))]
