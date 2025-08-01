@@ -8,7 +8,6 @@ use awgman::{
 };
 use base64::{prelude::BASE64_STANDARD, Engine};
 use clap::Parser;
-use expanduser::expanduser;
 use inquire::{
     validator::Validation, CustomUserError, Password, PasswordDisplayMode, Select, Text,
 };
@@ -17,6 +16,9 @@ use secrecy::SecretString;
 
 use colored::Colorize;
 use x25519_dalek::{PublicKey, StaticSecret};
+
+#[cfg(unix)]
+use expanduser::expanduser;
 
 #[derive(Parser, Debug)]
 #[command(version)]
@@ -292,7 +294,12 @@ fn do_top(ctx: &mut Context) -> Result<()> {
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    let vault_path = expanduser(&args.vault_path)?;
+
+    let vault_path = if cfg!(unix) { 
+        expanduser(&args.vault_path)? 
+    } else {
+        args.vault_path.clone().into()
+    };
 
     let vault: VaultFile;
 
