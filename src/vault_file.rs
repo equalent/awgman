@@ -4,8 +4,7 @@ use chacha20poly1305::{aead::AeadMutInPlace, KeyInit, XChaCha20Poly1305};
 use secrecy::{ExposeSecret, ExposeSecretMut, SecretBox, SecretString};
 use std::{
     fs::OpenOptions,
-    io::{Seek, Write},
-    os::unix::fs::FileExt,
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
 
@@ -172,7 +171,8 @@ impl VaultFile {
 
         let mut headers_buf: Vec<u8> = vec![0u8; headers_size];
 
-        file.read_at(headers_buf.as_mut_slice(), 0)?;
+        file.seek(SeekFrom::Start(0))?;
+        file.read(headers_buf.as_mut_slice())?;
 
         let secret: SecretBox<VaultSecret> = SecretBox::init_with_mut(|v| {
             VaultFile::derive_secret(password, &header.argon2, &header.salt, v).unwrap();
@@ -182,7 +182,8 @@ impl VaultFile {
 
         let mut buffer: Vec<u8> = vec![0u8; ciphertext_size];
 
-        file.read_at(buffer.as_mut_slice(), headers_size as u64)?;
+        file.seek(SeekFrom::Start(headers_size as u64))?;
+        file.read(buffer.as_mut_slice())?;
 
         let mut cipher = XChaCha20Poly1305::new(secret.expose_secret().into());
 

@@ -1,5 +1,8 @@
 use std::path::absolute;
 
+#[cfg(not(unix))]
+use std::path::PathBuf;
+
 use anyhow::{anyhow, Result};
 use awgman::{
     utils::{gen_psk, pause},
@@ -291,15 +294,21 @@ fn do_top(ctx: &mut Context) -> Result<()> {
     }
 }
 
+#[cfg(unix)]
+fn process_path(s: &String) {
+    expanduser(&args.vault_path)
+}
+
+#[cfg(not(unix))]
+fn process_path(s: &String) -> Result<PathBuf> {
+    Ok(s.clone().into())
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
 
 
-    let vault_path = if cfg!(unix) { 
-        expanduser(&args.vault_path)? 
-    } else {
-        args.vault_path.clone().into()
-    };
+    let vault_path = process_path(&args.vault_path)?;
 
     let vault: VaultFile;
 
