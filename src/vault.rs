@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{hash_map::Entry, HashMap},
     fmt::{Display, Write},
     net::Ipv4Addr,
 };
@@ -323,16 +323,26 @@ impl Vault {
     }
 
     pub fn add_device(&mut self, device: Device) -> Result<()> {
-        match self.devices.insert(device.id, device) {
-            Some(_) => Ok(()),
-            None => Err(anyhow!("Device already added!"))
+        match self.devices.entry(device.id) {
+            Entry::Vacant(v) => {
+                v.insert(device);
+                Ok(())
+            }
+            Entry::Occupied(_) => {
+                Err(anyhow!("Server already added!"))
+            }
         }
     }
 
     pub fn add_server(&mut self, server: Server) -> Result<()> {
-        match self.servers.insert(server.id, server) {
-            Some(_) => Ok(()),
-            None => Err(anyhow!("Server already added!"))
+        match self.servers.entry(server.id) {
+            Entry::Vacant(v) => {
+                v.insert(server);
+                Ok(())
+            }
+            Entry::Occupied(_) => {
+                Err(anyhow!("Server already added!"))
+            }
         }
     }
 
@@ -350,15 +360,25 @@ impl Vault {
     }
 
     pub fn remove_server(&mut self, server_id: &Nanoid) -> Result<()> {
-        match  self.servers.remove(server_id) {
+        match self.servers.remove(server_id) {
             Some(_) => Ok(()),
             None => Err(anyhow!("Server does not exist!")),
         }
     }
 
-    pub fn generate_device_config(&mut self, device_id: &Nanoid, server_id: &Nanoid) -> Result<String> {
-        let device = self.devices.get(device_id).ok_or_else(|| anyhow!("Device not found!"))?;
-        let server = self.servers.get_mut(server_id).ok_or_else(|| anyhow!("Server not found!"))?;
+    pub fn generate_device_config(
+        &mut self,
+        device_id: &Nanoid,
+        server_id: &Nanoid,
+    ) -> Result<String> {
+        let device = self
+            .devices
+            .get(device_id)
+            .ok_or_else(|| anyhow!("Device not found!"))?;
+        let server = self
+            .servers
+            .get_mut(server_id)
+            .ok_or_else(|| anyhow!("Server not found!"))?;
 
         device.generate_config(server)
     }
