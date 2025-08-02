@@ -1,15 +1,19 @@
+use std::fs::OpenOptions;
 use std::path::absolute;
 
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use anyhow::{anyhow, Result};
 use awgman::{
-    utils::gen_psk,
     vault::{AWGParams, Device, Protocol, Server},
     vault_file::VaultFile,
 };
-use base64::{prelude::BASE64_STANDARD, Engine};
+use cidr::parsers::parse_cidr_full;
+use cidr::Ipv4Cidr;
 use clap::Parser;
+use inquire::Confirm;
+use inquire::CustomType;
 use inquire::{
     validator::Validation, CustomUserError, Password, PasswordDisplayMode, Select, Text,
 };
@@ -17,7 +21,6 @@ use regex::Regex;
 use secrecy::SecretString;
 
 use colored::Colorize;
-use x25519_dalek::{PublicKey, StaticSecret};
 
 #[cfg(unix)]
 use expanduser::expanduser;
@@ -78,15 +81,14 @@ struct Context {
 fn do_view_devices(ctx: &Context) -> Result<()> {
     let vault = ctx.vault.vault();
 
-    if vault.devices.is_empty() {
+    if vault.devices().is_empty() {
         println!("🤷 No devices in the vault");
     } else {
-        for device in vault.devices.as_slice() {
-            let pubkey = PublicKey::from(&device.secret).to_bytes();
-
+        for (id, device) in vault.devices() {
             println!("\n--- {}", device.name);
+            println!("    ID: {}", id);
             println!("    User: {}", device.user);
-            println!("    Public Key: {}", BASE64_STANDARD.encode(pubkey));
+            println!("    Public Key: {}", device.public_key_b64());
         }
     }
 
@@ -106,84 +108,77 @@ fn do_add_device(ctx: &mut Context) -> Result<()> {
         None => return Ok(()),
     };
 
-    let secret = StaticSecret::random();
-    let psk = gen_psk()?;
+    let device = Device::new(name, user)?;
 
     println!("Saving...");
-    ctx.vault.transact(|v| {
-        v.devices.push(Device {
-            name,
-            user,
-            secret,
-            psk,
-        });
-        Ok(())
-    })
+    ctx.vault.transact(|v| v.add_device(device))
 }
 
 fn do_remove_device(ctx: &mut Context) -> Result<()> {
     let vault = ctx.vault.vault();
 
-    let device = match Select::new(
+    let choice = match Select::new(
         "Which device do you want to remove?",
-        vault.devices.to_vec(),
+        vault.make_device_choice_vec(),
     )
     .prompt_skippable()?
     {
         Some(n) => n,
         None => return Ok(()),
     };
+
+    let confirm = Confirm::new("Are you sure you want to do remove this device? <y/n>")
+        .with_help_message("Device private key will be permanently wiped")
+        .prompt()?;
+
+    if !confirm {
+        return Ok(());
+    }
 
     println!("Saving...");
-    ctx.vault.transact(|v| {
-        v.devices.retain(|d| *d != device);
-        Ok(())
-    })
+    ctx.vault.transact(|v| v.remove_device(&choice.id))
 }
 
-fn do_generate_device_config(ctx: &Context) -> Result<()> {
+fn do_generate_device_config(ctx: &mut Context) -> Result<()> {
     let vault = ctx.vault.vault();
 
-    let device = match Select::new(
-        "Select device:",
-        vault.devices.to_vec(),
-    )
-    .prompt_skippable()?
-    {
-        Some(n) => n,
-        None => return Ok(()),
-    };
+    let device_entry =
+        match Select::new("Select device:", vault.make_device_choice_vec()).prompt_skippable()? {
+            Some(n) => n,
+            None => return Ok(()),
+        };
 
-    let server = match Select::new(
-        "Select server:",
-        vault.servers.to_vec(),
-    )
-    .prompt_skippable()?
-    {
-        Some(n) => n,
-        None => return Ok(()),
-    };
+    let server_entry =
+        match Select::new("Select server:", vault.make_server_choice_vec()).prompt_skippable()? {
+            Some(n) => n,
+            None => return Ok(()),
+        };
 
-    println!("{}", device.generate_config(&server)?);
-    Ok(())
+    ctx.vault.transact(|v| {
+        println!(
+            "{}",
+            v.generate_device_config(&device_entry.id, &server_entry.id)?
+        );
+        Ok(())
+    })
 }
 
 fn do_view_servers(ctx: &Context) -> Result<()> {
     let vault = ctx.vault.vault();
 
-    if vault.servers.is_empty() {
+    if vault.servers().is_empty() {
         println!("🤷 No servers in the vault");
     } else {
-        for server in vault.servers.as_slice() {
-            let pubkey = PublicKey::from(&server.secret).to_bytes();
-
+        for (_, server) in vault.servers() {
             println!("\n--- {}", server.name);
+            println!("    ID: {}", server.id());
             println!("    Endpoint: {}", server.endpoint);
-            println!("    Public Key: {}", BASE64_STANDARD.encode(pubkey));
+            println!("    Public Key: {}", server.public_key_b64());
+            println!("    Client Network: {}", server.client_net());
+            println!("    Addresses Used: {}", server.client_net_used());
+            println!("    Addresses Available: {}", server.client_net_available());
         }
     }
-
-    //pause();
 
     Ok(())
 }
@@ -199,28 +194,73 @@ fn do_add_server(ctx: &mut Context) -> Result<()> {
         None => return Ok(()),
     };
 
+    let client_net = CustomType::<Ipv4Cidr>::new("Enter CLIENT NETWORK:")
+        .with_help_message("Use IPv4 CIDR format. Server itself will always use the first address")
+        .with_parser(
+            &|i| match parse_cidr_full(i, FromStr::from_str, FromStr::from_str) {
+                Ok(val) => Ok(val),
+                Err(_) => Err(()),
+            },
+        )
+        .with_validator(|net: &Ipv4Cidr| {
+            if net.is_host_address() {
+                Ok(Validation::Invalid(
+                    "It mush be a network, not a single host".into(),
+                ))
+            } else if net.network_length() > 26 {
+                Ok(Validation::Invalid(
+                    format!(
+                        "At most /26 network is allowed, yours is /{}",
+                        net.network_length()
+                    )
+                    .into(),
+                ))
+            } else {
+                Ok(Validation::Valid)
+            }
+        })
+        .with_placeholder("10.0.0.0/16")
+        .prompt()?;
+
     let protocols = vec!["WireGuard", "AmneziaWG"];
     let protocol = match Select::new("Choose SERVER PROTOCOL:", protocols).prompt_skippable()? {
         Some(p) => match p {
             "WireGuard" => Protocol::WireGuard,
             "AmneziaWG" => Protocol::AmneziaWG(AWGParams::generate()),
-            _ => return Ok(())
+            _ => return Ok(()),
         },
         None => return Ok(()),
     };
 
-    let secret = StaticSecret::random();
+    let server = Server::new(name, endpoint, protocol, client_net);
 
     println!("Saving...");
-    ctx.vault.transact(|v| {
-        v.servers.push(Server {
-            name,
-            endpoint,
-            protocol,
-            secret,
-        });
-        Ok(())
-    })
+    ctx.vault.transact(|v| v.add_server(server))
+}
+
+fn do_remove_server(ctx: &mut Context) -> Result<()> {
+    let vault = ctx.vault.vault();
+
+    let choice = match Select::new(
+        "Which device do you want to remove?",
+        vault.make_server_choice_vec(),
+    )
+    .prompt_skippable()?
+    {
+        Some(n) => n,
+        None => return Ok(()),
+    };
+
+    let confirm = Confirm::new("Are you sure you want to do remove this server? <y/n>")
+        .with_help_message("Server private key will be permanently wiped")
+        .prompt()?;
+
+    if !confirm {
+        return Ok(());
+    }
+
+    println!("Saving...");
+    ctx.vault.transact(|v| v.remove_server(&choice.id))
 }
 
 fn do_verify_current_password(ctx: &mut Context) -> Result<()> {
@@ -259,6 +299,23 @@ fn do_change_password(ctx: &mut Context) -> Result<()> {
     Ok(())
 }
 
+fn do_json_dump(ctx: &Context) -> Result<()> {
+    let confirm = Confirm::new("Are you sure you want to do a JSON dump? <y/n>")
+        .with_help_message("JSON dumps are NOT encrypted and store secrets in plaintext!")
+        .prompt()?;
+
+    if !confirm {
+        return Ok(());
+    }
+
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open("awgdump.json")?;
+    serde_json::to_writer_pretty(file, ctx.vault.vault())?;
+    Ok(())
+}
+
 fn do_top(ctx: &mut Context) -> Result<()> {
     let options: Vec<&str> = vec![
         "View devices",
@@ -271,6 +328,7 @@ fn do_top(ctx: &mut Context) -> Result<()> {
         "Generate server config",
         "Change password",
         "[DEBUG] Force save",
+        "[DEBUG] JSON dump",
         "Exit",
     ];
 
@@ -284,9 +342,11 @@ fn do_top(ctx: &mut Context) -> Result<()> {
             "Generate device config" => do_generate_device_config(ctx),
             "View servers" => do_view_servers(ctx),
             "Add server" => do_add_server(ctx),
+            "Remove server" => do_remove_server(ctx),
             "Change password" => do_change_password(ctx),
             "Exit" => Err(anyhow!("Exit!")),
             "[DEBUG] Force save" => ctx.vault.save(),
+            "[DEBUG] JSON dump" => do_json_dump(ctx),
             _ => Ok(()),
         },
         Err(e) => Err(e.into()),
@@ -297,7 +357,7 @@ fn do_top(ctx: &mut Context) -> Result<()> {
 fn process_path(s: &String) -> Result<PathBuf> {
     match expanduser(&s) {
         Ok(v) => Ok(v),
-        Err(e) => Err(anyhow!("Failed to expand user: {}", e))
+        Err(e) => Err(anyhow!("Failed to expand user: {}", e)),
     }
 }
 
@@ -308,7 +368,6 @@ fn process_path(s: &String) -> Result<PathBuf> {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-
 
     let vault_path = process_path(&args.vault_path)?;
 
@@ -337,7 +396,10 @@ fn main() -> Result<()> {
             );
             let result = VaultFile::open(&vault_path, &password);
             if result.is_err() {
-                println!("Incorrect password! Please try again");
+                println!(
+                    "Incorrect password or corruption! Details: {}",
+                    result.err().unwrap()
+                );
             } else {
                 vault = result.unwrap();
                 break;
