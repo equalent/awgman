@@ -34,6 +34,17 @@ pub struct AWGParams {
     pub jc: u32,
     pub jmin: u32,
     pub jmax: u32,
+    pub s1: u32,
+    pub s2: u32,
+    pub h1: u32,
+    pub h2: u32,
+    pub h3: u32,
+    pub h4: u32,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct Assignment {
+    offset: u32,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -42,6 +53,8 @@ pub struct Server {
     pub name: String,
     pub endpoint: String,
     pub protocol: Protocol,
+    pub dns: String,
+    pub port: u16,
     secret: StaticSecret,
 
     /// Client network
@@ -49,7 +62,7 @@ pub struct Server {
     client_net: Ipv4Cidr,
 
     /// Maps device ID to its range offset
-    assignments: HashMap<Nanoid, u32>,
+    assignments: HashMap<Nanoid, Assignment>,
 
     /// Bitmap of address allocations
     bitmap: BitVec<u64, Lsb0>,
@@ -110,6 +123,8 @@ impl Device {
 
         let addr = server.register_or_get_device_addr(&self.id)?;
         let inet = Ipv4Inet::new(addr, server.client_net.network_length())?;
+        let device_pubkey = PublicKey::from(&self.secret);
+        let pubkey = PublicKey::from(&server.secret);
 
         writeln!(&mut s, "[Interface]")?;
         writeln!(&mut s, "Address = {}", inet)?;
@@ -118,8 +133,27 @@ impl Device {
             "PrivateKey = {}",
             BASE64_STANDARD.encode(self.secret.as_bytes())
         )?;
+        writeln!(
+            &mut s,
+            "# PublicKey = {}",
+            BASE64_STANDARD.encode(device_pubkey.as_bytes())
+        )?;
+        writeln!(&mut s, "DNS = {}", "1.1.1.1")?;
 
-        let pubkey = PublicKey::from(&server.secret);
+        match &server.protocol {
+            Protocol::AmneziaWG(awg) => {
+                writeln!(&mut s, "Jc = {}", awg.jc)?;
+                writeln!(&mut s, "Jmin = {}", awg.jmin)?;
+                writeln!(&mut s, "Jmax = {}", awg.jmax)?;
+                writeln!(&mut s, "S1 = {}", awg.s1)?;
+                writeln!(&mut s, "S2 = {}", awg.s2)?;
+                writeln!(&mut s, "H1 = {}", awg.h1)?;
+                writeln!(&mut s, "H2 = {}", awg.h2)?;
+                writeln!(&mut s, "H3 = {}", awg.h3)?;
+                writeln!(&mut s, "H4 = {}", awg.h4)?;
+            }
+            _ => {}
+        };
 
         writeln!(&mut s, "\n[Peer]")?;
         writeln!(
@@ -140,11 +174,18 @@ impl Device {
 }
 
 impl Server {
-    pub fn new(name: String, endpoint: String, protocol: Protocol, client_net: Ipv4Cidr) -> Server {
+    pub fn new(
+        name: String,
+        endpoint: String,
+        protocol: Protocol,
+        dns: String,
+        port: u16,
+        client_net: Ipv4Cidr,
+    ) -> Server {
         let secret = StaticSecret::random();
 
-        // minus one because server uses the first one
-        let client_net_size = client_net.iter().count() - 1;
+        // minus two because the first is zero and server uses the next one
+        let client_net_size = client_net.iter().count() - 2;
 
         let regvec = bitvec![u64, Lsb0; 0; client_net_size];
 
@@ -152,6 +193,8 @@ impl Server {
             id: Nanoid::new(),
             name,
             endpoint,
+            dns,
+            port,
             protocol,
             secret,
             client_net,
@@ -162,6 +205,10 @@ impl Server {
 
     pub fn id(&self) -> Nanoid {
         self.id
+    }
+
+    pub fn own_address(&self) -> Ipv4Addr {
+        self.client_net.iter().nth(1).unwrap().address()
     }
 
     pub fn client_net(&self) -> Ipv4Cidr {
@@ -182,6 +229,66 @@ impl Server {
 
     pub fn public_key_b64(&self) -> String {
         BASE64_STANDARD.encode(self.public_key().to_bytes())
+    }
+
+    pub fn generate_config(&self, vault: &Vault) -> Result<String> {
+        let mut s = String::with_capacity(2048);
+
+        let addr = self.own_address();
+        let pubkey = PublicKey::from(&self.secret);
+
+        writeln!(&mut s, "[Interface]")?;
+        writeln!(
+            &mut s,
+            "PrivateKey = {}",
+            BASE64_STANDARD.encode(self.secret.as_bytes())
+        )?;
+        writeln!(
+            &mut s,
+            "# PublicKey = {}",
+            BASE64_STANDARD.encode(pubkey.as_bytes())
+        )?;
+        writeln!(&mut s, "Address = {}", addr)?;
+        writeln!(&mut s, "ListenPort = {}", self.port)?;
+
+        match &self.protocol {
+            Protocol::AmneziaWG(awg) => {
+                writeln!(&mut s, "Jc = {}", awg.jc)?;
+                writeln!(&mut s, "Jmin = {}", awg.jmin)?;
+                writeln!(&mut s, "Jmax = {}", awg.jmax)?;
+                writeln!(&mut s, "S1 = {}", awg.s1)?;
+                writeln!(&mut s, "S2 = {}", awg.s2)?;
+                writeln!(&mut s, "H1 = {}", awg.h1)?;
+                writeln!(&mut s, "H2 = {}", awg.h2)?;
+                writeln!(&mut s, "H3 = {}", awg.h3)?;
+                writeln!(&mut s, "H4 = {}", awg.h4)?;
+            }
+            _ => {}
+        };
+
+        writeln!(&mut s, "PostUp = {}", "iptables -A FORWARD -i %i -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE")?;
+        writeln!(&mut s, "PostDown = {}", "iptables -D FORWARD -i %i -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE")?;
+
+        for (device_id, assn) in &self.assignments {
+            let device = vault
+                .devices
+                .get(device_id)
+                .expect("Device with assignment not found in vault");
+            let inet = Ipv4Inet::new(self.offset_to_address(assn.offset).unwrap(), 32)?;
+
+            writeln!(&mut s, "\n[Peer]")?;
+            writeln!(&mut s, "# DEVICE {}", device)?;
+            writeln!(&mut s, "PublicKey = {}", device.public_key_b64())?;
+            writeln!(
+                &mut s,
+                "PresharedKey = {}",
+                BASE64_STANDARD.encode(device.psk)
+            )?;
+            writeln!(&mut s, "AllowedIPs = {}", inet)?;
+        }
+
+        s.shrink_to_fit();
+        Ok(s)
     }
 
     fn allocate_offset(&mut self) -> Result<u32, IPAllocError> {
@@ -222,15 +329,15 @@ impl Server {
     }
 
     fn offset_to_address(&self, offset: u32) -> Option<Ipv4Addr> {
-        match self.client_net.iter().nth(offset as usize + 1) {
+        match self.client_net.iter().nth(offset as usize + 2) {
             Some(n) => Some(n.address()),
             None => None,
         }
     }
 
-    fn register_or_get_device_offset(&mut self, device_id: &Nanoid) -> Result<u32> {
+    fn register_or_get_device_assignment(&mut self, device_id: &Nanoid) -> Result<Assignment> {
         match self.assignments.get(&device_id) {
-            Some(offset) => return Ok(*offset),
+            Some(assignment) => return Ok(assignment.clone()),
             None => {}
         };
 
@@ -239,15 +346,17 @@ impl Server {
             Ok(v) => v,
         };
 
-        self.assignments.insert(*device_id, offset);
+        let assignment = Assignment { offset };
 
-        Ok(offset)
+        self.assignments.insert(*device_id, assignment.clone());
+
+        Ok(assignment)
     }
 
     fn register_or_get_device_addr(&mut self, device_id: &Nanoid) -> Result<Ipv4Addr> {
-        match self.register_or_get_device_offset(device_id) {
-            Ok(offset) => self
-                .offset_to_address(offset)
+        match self.register_or_get_device_assignment(device_id) {
+            Ok(assignment) => self
+                .offset_to_address(assignment.offset)
                 .ok_or_else(|| anyhow!("Failed to convert offset to IPv4")),
             Err(e) => Err(e),
         }
@@ -255,11 +364,13 @@ impl Server {
 
     fn unregister_device(&mut self, device_id: &Nanoid) {
         match self.assignments.get(&device_id) {
-            Some(offset) => {
-                self.free_offset(*offset);
+            Some(assignment) => {
+                self.free_offset(assignment.offset);
             }
             None => {}
         }
+
+        self.assignments.remove(device_id);
     }
 }
 
@@ -271,6 +382,12 @@ impl AWGParams {
             jc: random_range(3..=127),
             jmin: jmin,
             jmax: random_range((jmin + 1)..=1270),
+            s1: random_range(3..=127),
+            s2: random_range(3..=127),
+            h1: random_range(0x10000011..=0x7FFFFF00),
+            h2: random_range(0x10000011..=0x7FFFFF00),
+            h3: random_range(0x10000011..=0x7FFFFF00),
+            h4: random_range(0x10000011..=0x7FFFFF00),
         }
     }
 }
@@ -328,9 +445,7 @@ impl Vault {
                 v.insert(device);
                 Ok(())
             }
-            Entry::Occupied(_) => {
-                Err(anyhow!("Server already added!"))
-            }
+            Entry::Occupied(_) => Err(anyhow!("Server already added!")),
         }
     }
 
@@ -340,9 +455,7 @@ impl Vault {
                 v.insert(server);
                 Ok(())
             }
-            Entry::Occupied(_) => {
-                Err(anyhow!("Server already added!"))
-            }
+            Entry::Occupied(_) => Err(anyhow!("Server already added!")),
         }
     }
 

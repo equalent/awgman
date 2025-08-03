@@ -74,7 +74,7 @@ fn validate_password(password: &str) -> Result<Validation, CustomUserError> {
 }
 
 struct Context {
-    args: Args,
+    _args: Args,
     vault: VaultFile,
 }
 
@@ -175,6 +175,7 @@ fn do_view_servers(ctx: &Context) -> Result<()> {
             println!("    Endpoint: {}", server.endpoint);
             println!("    Public Key: {}", server.public_key_b64());
             println!("    Client Network: {}", server.client_net());
+            println!("    Own Address: {}", server.own_address());
             println!("    Addresses Used: {}", server.client_net_used());
             println!("    Addresses Available: {}", server.client_net_available());
         }
@@ -190,6 +191,22 @@ fn do_add_server(ctx: &mut Context) -> Result<()> {
     };
 
     let endpoint = match Text::new("Enter SERVER ENDPOINT:").prompt_skippable()? {
+        Some(n) => n,
+        None => return Ok(()),
+    };
+
+    let dns = match Text::new("Enter SERVER DNS:")
+        .with_default("1.1.1.1")
+        .prompt_skippable()?
+    {
+        Some(n) => n,
+        None => return Ok(()),
+    };
+
+    let port = match CustomType::<u16>::new("Enter SERVER PORT:")
+        .with_default(443)
+        .prompt_skippable()?
+    {
         Some(n) => n,
         None => return Ok(()),
     };
@@ -232,7 +249,7 @@ fn do_add_server(ctx: &mut Context) -> Result<()> {
         None => return Ok(()),
     };
 
-    let server = Server::new(name, endpoint, protocol, client_net);
+    let server = Server::new(name, endpoint, protocol, dns, port, client_net);
 
     println!("Saving...");
     ctx.vault.transact(|v| v.add_server(server))
@@ -261,6 +278,21 @@ fn do_remove_server(ctx: &mut Context) -> Result<()> {
 
     println!("Saving...");
     ctx.vault.transact(|v| v.remove_server(&choice.id))
+}
+
+fn do_generate_server_config(ctx: &mut Context) -> Result<()> {
+    let vault = ctx.vault.vault();
+
+    let server_entry =
+        match Select::new("Select server:", vault.make_server_choice_vec()).prompt_skippable()? {
+            Some(n) => n,
+            None => return Ok(()),
+        };
+
+    let server = vault.servers().get(&server_entry.id).unwrap();
+
+    println!("{}", server.generate_config(vault)?);
+    Ok(())
 }
 
 fn do_verify_current_password(ctx: &mut Context) -> Result<()> {
@@ -343,6 +375,7 @@ fn do_top(ctx: &mut Context) -> Result<()> {
             "View servers" => do_view_servers(ctx),
             "Add server" => do_add_server(ctx),
             "Remove server" => do_remove_server(ctx),
+            "Generate server config" => do_generate_server_config(ctx),
             "Change password" => do_change_password(ctx),
             "Exit" => Err(anyhow!("Exit!")),
             "[DEBUG] Force save" => ctx.vault.save(),
@@ -428,7 +461,7 @@ fn main() -> Result<()> {
         vault = VaultFile::create(&vault_path, &password)?;
     }
 
-    let mut ctx = Context { args, vault };
+    let mut ctx = Context { _args: args, vault };
 
     loop {
         do_top(&mut ctx)?;
