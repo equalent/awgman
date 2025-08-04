@@ -2,6 +2,8 @@
 
 [![CI Build](https://github.com/equalent/awgman/actions/workflows/ci.yaml/badge.svg)](https://github.com/equalent/awgman/actions/workflows/ci.yaml)
 
+![crates.io](https://img.shields.io/crates/v/awgman.svg)
+
 `awgman` is a tool to centrally manage one or more WireGuard/AmneziaWG VPN servers.
 
 It securely handles:
