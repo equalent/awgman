@@ -17,6 +17,8 @@ use inquire::CustomType;
 use inquire::{
     validator::Validation, CustomUserError, Password, PasswordDisplayMode, Select, Text,
 };
+use qrcode::render::unicode;
+use qrcode::QrCode;
 use regex::Regex;
 use secrecy::SecretString;
 
@@ -154,13 +156,29 @@ fn do_generate_device_config(ctx: &mut Context) -> Result<()> {
             None => return Ok(()),
         };
 
+    let mut config: String = String::new();
     ctx.vault.transact(|v| {
-        println!(
-            "{}",
-            v.generate_device_config(&device_entry.id, &server_entry.id)?
-        );
+        config = v.generate_device_config(&device_entry.id, &server_entry.id)?;
         Ok(())
-    })
+    })?;
+
+    println!(
+        "{}",
+        config
+    );
+
+    let code = QrCode::new(config)?;
+
+    let image = code.render::<unicode::Dense1x2>()
+        .dark_color(unicode::Dense1x2::Light)
+        .light_color(unicode::Dense1x2::Dark)
+        .build();
+    println!(
+        "{}",
+        image
+    );
+
+    Ok(())
 }
 
 fn do_view_servers(ctx: &Context) -> Result<()> {

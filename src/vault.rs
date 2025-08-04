@@ -13,7 +13,7 @@ use rand::{random_range, rng, Rng};
 use serde::{Deserialize, Serialize};
 use x25519_dalek::{PublicKey, StaticSecret};
 
-use crate::utils::{gen_psk, NanoidEntry};
+use crate::{cbox::Cbox, utils::{gen_psk, NanoidEntry}};
 
 pub type PSK = [u8; 32];
 
@@ -81,6 +81,7 @@ pub struct Device {
 pub struct Vault {
     servers: HashMap<Nanoid, Server>,
     devices: HashMap<Nanoid, Device>,
+    cbox: Option<Cbox>
 }
 
 impl Vault {
@@ -88,6 +89,7 @@ impl Vault {
         Vault {
             servers: HashMap::new(),
             devices: HashMap::new(),
+            cbox: None
         }
     }
 }
