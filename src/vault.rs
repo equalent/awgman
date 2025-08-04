@@ -81,7 +81,7 @@ pub struct Device {
 pub struct Vault {
     servers: HashMap<Nanoid, Server>,
     devices: HashMap<Nanoid, Device>,
-    cbox: Option<Cbox>
+    pub cbox: Option<Cbox>
 }
 
 impl Vault {

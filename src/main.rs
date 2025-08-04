@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use anyhow::{anyhow, Result};
+use awgman::cbox::Cbox;
 use awgman::{
     vault::{AWGParams, Device, Protocol, Server},
     vault_file::VaultFile,
@@ -142,41 +143,72 @@ fn do_remove_device(ctx: &mut Context) -> Result<()> {
 }
 
 fn do_generate_device_config(ctx: &mut Context) -> Result<()> {
+    let mut config: String = String::new();
+    let name: String;
+
+    {
+        let vault = ctx.vault.vault();
+
+        let device_entry = match Select::new("Select device:", vault.make_device_choice_vec())
+            .prompt_skippable()?
+        {
+            Some(n) => n,
+            None => return Ok(()),
+        };
+
+        let server_entry = match Select::new("Select server:", vault.make_server_choice_vec())
+            .prompt_skippable()?
+        {
+            Some(n) => n,
+            None => return Ok(()),
+        };
+
+        name = vault.devices()[&device_entry.id].name.clone();
+
+        ctx.vault.transact(|v| {
+            config = v.generate_device_config(&device_entry.id, &server_entry.id)?;
+            Ok(())
+        })?;
+    }
+
     let vault = ctx.vault.vault();
 
-    let device_entry =
-        match Select::new("Select device:", vault.make_device_choice_vec()).prompt_skippable()? {
-            Some(n) => n,
-            None => return Ok(()),
-        };
+    let mut options: Vec<String> = vec!["Show QR code".to_string(), "Show raw config".to_string()];
 
-    let server_entry =
-        match Select::new("Select server:", vault.make_server_choice_vec()).prompt_skippable()? {
-            Some(n) => n,
-            None => return Ok(()),
-        };
+    if ctx.vault.vault().cbox.is_some() {
+        options.insert(0, "Show cbox link and QR".to_string());
+    }
 
-    let mut config: String = String::new();
-    ctx.vault.transact(|v| {
-        config = v.generate_device_config(&device_entry.id, &server_entry.id)?;
-        Ok(())
-    })?;
+    match Select::new("Select action:", options).prompt()?.as_str() {
+        "Show QR code" => {
+            let code = QrCode::new(config)?;
 
-    println!(
-        "{}",
-        config
-    );
+            let image = code
+                .render::<unicode::Dense1x2>()
+                .dark_color(unicode::Dense1x2::Light)
+                .light_color(unicode::Dense1x2::Dark)
+                .build();
+            println!("{}", image);
+        }
+        "Show raw config" => {
+            println!("{}", config);
+        }
+        "Show cbox link and QR" => {
+            let cbox = vault.cbox.as_ref().unwrap();
+            let res = cbox.post(&name, &config)?;
+            println!("URL: {}\n", res.short);
 
-    let code = QrCode::new(config)?;
+            let code = QrCode::new(res.short)?;
 
-    let image = code.render::<unicode::Dense1x2>()
-        .dark_color(unicode::Dense1x2::Light)
-        .light_color(unicode::Dense1x2::Dark)
-        .build();
-    println!(
-        "{}",
-        image
-    );
+            let image = code
+                .render::<unicode::Dense1x2>()
+                .dark_color(unicode::Dense1x2::Light)
+                .light_color(unicode::Dense1x2::Dark)
+                .build();
+            println!("{}", image);
+        }
+        _ => {}
+    }
 
     Ok(())
 }
@@ -349,6 +381,38 @@ fn do_change_password(ctx: &mut Context) -> Result<()> {
     Ok(())
 }
 
+fn do_setup_cbox(ctx: &mut Context) -> Result<()> {
+    if ctx.vault.vault().cbox.is_some() {
+        let confirm =
+            Confirm::new("Cbox is already configured. Are you sure you want to overwrite? <y/n>")
+                .prompt()?;
+
+        if !confirm {
+            return Ok(());
+        }
+    }
+
+    let endpoint = match Text::new("Enter CBOX ENDPOINT:").prompt_skippable()? {
+        Some(v) => v,
+        None => return Ok(()),
+    };
+
+    let key = match Password::new("Enter CBOX KEY:")
+        .without_confirmation()
+        .with_display_toggle_enabled()
+        .with_display_mode(PasswordDisplayMode::Masked)
+        .prompt_skippable()?
+    {
+        Some(v) => v,
+        None => return Ok(()),
+    };
+
+    ctx.vault.transact(|v| {
+        v.cbox = Some(Cbox { key, endpoint });
+        Ok(())
+    })
+}
+
 fn do_json_dump(ctx: &Context) -> Result<()> {
     let confirm = Confirm::new("Are you sure you want to do a JSON dump? <y/n>")
         .with_help_message("JSON dumps are NOT encrypted and store secrets in plaintext!")
@@ -377,6 +441,7 @@ fn do_top(ctx: &mut Context) -> Result<()> {
         "Remove server",
         "Generate server config",
         "Change password",
+        "Configure cbox",
         "[DEBUG] Force save",
         "[DEBUG] JSON dump",
         "Exit",
@@ -396,6 +461,7 @@ fn do_top(ctx: &mut Context) -> Result<()> {
             "Generate server config" => do_generate_server_config(ctx),
             "Change password" => do_change_password(ctx),
             "Exit" => Err(anyhow!("Exit!")),
+            "Configure cbox" => do_setup_cbox(ctx),
             "[DEBUG] Force save" => ctx.vault.save(),
             "[DEBUG] JSON dump" => do_json_dump(ctx),
             _ => Ok(()),
